@@ -36,16 +36,17 @@ pub async fn run_simulation(pool: &PgPool, _hours: u64, scanner: &Scanner) -> Re
         for l in listings.into_iter() {
             // Enrich with solscan and dexscreener data
             let mut ev: TokenEvent = l.clone().into();
-            if let Ok(Some(s)) = scanner.query_solscan_token(&l.mint).await {
+            if let Ok(Some(s)) = scanner.query_solscan_token(&l.token_address).await {
                 ev.holders = s.holders.unwrap_or(0) as i32;
                 // naive dev_hold estimate: check top owner if present (placeholder)
                 if let Some(owner_amount) = s.owner_amount.as_ref().and_then(|v| v.get(0)) {
                     // owner_amount is (address, amount) tuple in placeholder
-                    let pct = owner_amount.1 / s.total_supply.unwrap_or(1.0) * 100.0;
+                    let total_supply = s.supply.as_ref().and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0);
+                    let pct = owner_amount.1 / total_supply * 100.0;
                     ev.dev_hold_pct = pct.min(100.0);
                 }
             }
-            if let Ok(Some(d)) = scanner.query_dexscreener_pair(&l.mint).await {
+            if let Ok(Some(d)) = scanner.query_dexscreener_pair(&l.token_address).await {
                 if let Some(pairs) = d.pairs {
                     if let Some(first) = pairs.get(0) {
                         ev.liquidity_usd = first.liquidity_usd.unwrap_or(0.0);
