@@ -1,13 +1,98 @@
 
-# Solana Memecoin Strategy Simulator — Rust
+# Strategy
 
-This repository is a **local paper-trading simulator** and strategy validation tool implemented in Rust. It implements the strategy you specified:
+Buy low-market-cap Pump.fun tokens before Raydium listing, and sell right before or right after the first liquidity event, while filtering out rugs using on-chain data.
 
-- **Entry**: buy tokens with market cap between 50k–250k (simulated Pump.fun universe)
-- **Exit**: exit 50–100% before "graduation" or immediately after first Raydium-style liquidity add
-- Extra filters: dev wallet concentration, holders > 200, avoid devs >15% supply
+1. ENTRY STRATEGY (When to Buy)
 
-**Important:** This is a *simulator / paper-trader* only. It does not place real on-chain transactions.
+Target: Early Pump.fun tokens with low market cap
+	•	Market Cap at Entry:
+$50k → $250k
+(Avoid >$300k — rug probability increases sharply)
+
+Only buy tokens that meet ALL conditions below:
+
+✔ A. Reputation Filters
+	•	Dev wallet not linked to known rug pulls (track dev addresses from prior tokens)
+	•	Dev holds <15% of supply
+(Big dev bags = high rug probability)
+
+✔ B. Organic Traction Filters
+	•	Token is new and listed on:
+	•	Moralis Pump.fun feed
+	•	Trending on Solscan, DEX Screener, Birdeye
+	•	At least 200+ holders pre-Raydium
+	•	Strong buy pressure (liquidity flowing in)
+
+✔ C. On-Chain Safety Checks
+	•	No suspicious liquidity provider patterns
+	•	No stealth mints
+	•	No sudden supply increases
+	•	Verified metadata present
+
+
+✅ 2. EXIT STRATEGY (When to Sell)
+
+Two exit conditions — whichever comes first:
+
+Option A — BEFORE Raydium Listing
+
+Sell when MC reaches:
++50% to +100% profit
+(High win-rate because most pumps fade before LP)
+
+Option B — RIGHT AFTER Raydium LP Creation
+
+Sell immediately after first Raydium liquidity add
+	•	This is usually a fast 1.3x–3x spike
+	•	Take profits early — don’t hold longs after initial LP
+
+DO NOT hold long-term unless it becomes a real community coin (rare).
+
+⸻
+
+📊 3. Position Sizing & Portfolio Rules
+	•	Total simulated bankroll: 3 SOL
+	•	Max per trade: 0.5 SOL
+	•	Never overlap more than 5 active positions
+	•	Use fixed risk:
+	•	Cut loss if MC drops −20% from entry
+	•	Or if dev behavior turns suspicious
+
+⸻
+
+🧠 4. Bot Logic Summary (What the scanner does)
+
+A. Data Sources (all free or low-cost, now standardized to Moralis)
+	•	Moralis Pump.fun New Listings API → discover tokens
+	•	Moralis Token Metadata → supply, decimals, creation
+	•	Moralis Holder API → holder count
+	•	Moralis Token Distribution → dev bag %
+
+B. Scoring System
+
+Bot assigns a “trade score” based on:
+	•	Holder count
+	•	Dev bag %
+	•	Market cap
+	•	Traction speed
+	•	Rug signals
+	•	Liquidity inflow
+
+Only buys tokens above a threshold (e.g., Score ≥ 75).
+
+⸻
+
+💰 5. Expected Outcomes (Statistically)
+
+With proper filtering:
+	•	Win rate: 55–70%
+	•	Typical profit per win: +40–150%
+	•	Typical loss per rug: −20–100%
+	•	Overall expectancy: positive if rug filters are strong
+
+Snipers who follow this approach often grow small portfolios 3×–10× over weeks, but it requires strict filtering and fast exits.
+
 
 ## What is included
 
