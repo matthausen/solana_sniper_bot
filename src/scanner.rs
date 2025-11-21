@@ -1,3 +1,4 @@
+use crate::models::*;
 use crate::strategy::TokenEvent;
 use anyhow::Result;
 use reqwest::Client;
@@ -8,180 +9,295 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct Scanner {
     client: Client,
-    moralis_key: Option<String>,
-    solscan_key: Option<String>,
+    rpc_url: String,
     dexscreener_key: Option<String>,
 }
 
+// Solana RPC structures
+#[derive(Debug, serde::Serialize)]
+struct RpcRequest {
+    jsonrpc: String,
+    id: u64,
+    method: String,
+    params: serde_json::Value,
+}
+
 #[derive(Debug, Deserialize)]
-struct PumpFunResponse {
-    pub result: Option<Vec<PumpFunListing>>,
+struct RpcResponse<T> {
+    result: Option<T>,
+    error: Option<serde_json::Value>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PumpFunListing {
-    pub token_address: String,
-    pub name: Option<String>,
-    pub symbol: Option<String>,
-    pub logo: Option<String>,
-    pub decimals: Option<String>,
-    pub price_native: Option<String>,
-    pub price_usd: Option<String>,
-    pub liquidity: Option<String>,
-    pub fully_diluted_valuation: Option<String>,
-    pub created_at: Option<String>,
+#[derive(Debug, Deserialize)]
+struct ProgramAccount {
+    pubkey: String,
+    account: AccountData,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MoralisTokenMetadata {
-    pub mint: Option<String>,
-    pub standard: Option<String>,
-    pub name: Option<String>,
-    pub symbol: Option<String>,
-    pub metaplex: Option<MoralisMetaplex>,
-    pub decimals: Option<u8>,
-    pub mint_authority: Option<String>,
-    pub freeze_authority: Option<String>,
-    pub supply: Option<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MoralisMetaplex {
-    pub metadata_uri: Option<String>,
-    pub update_authority: Option<String>,
-    pub seller_fee_basis_points: Option<u32>,
-    pub primary_sale_happened: Option<bool>,
-    pub is_mutable: Option<bool>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MoralisHolderStats {
-    pub total: Option<u64>,
-    pub supply_distribution: Option<MoralisSupplyDistribution>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MoralisSupplyDistribution {
-    pub top_10_holders_percentage: Option<f64>,
-    pub top_20_holders_percentage: Option<f64>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MoralisTopHoldersResponse {
-    pub result: Option<Vec<MoralisTopHolder>>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MoralisTopHolder {
-    pub owner_address: Option<String>,
-    pub amount: Option<String>,
-    pub amount_formatted: Option<String>,
-    pub percentage_relative_to_total_supply: Option<f64>,
-    pub usd_value: Option<f64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct DexScreenerPair {
-    pub pairs: Option<Vec<DexPairInfo>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct DexPairInfo {
-    pub liquidity_usd: Option<f64>,
-    pub price_usd: Option<f64>,
+#[derive(Debug, Deserialize)]
+struct AccountData {
+    data: Vec<String>, // [base64_data, encoding]
+    lamports: u64,
 }
 
 impl Scanner {
-    pub fn new(
-        moralis_key: Option<String>,
-        solscan_key: Option<String>,
-        dexscreener_key: Option<String>,
-    ) -> Self {
+    pub fn new(dexscreener_key: Option<String>) -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(10))
             .user_agent("sol-memebot/0.1")
             .build()
             .unwrap();
+
         Scanner {
             client,
-            moralis_key,
-            solscan_key,
+            rpc_url: "https://api.mainnet-beta.solana.com".to_string(),
             dexscreener_key,
         }
     }
 
-    /// Fetch recent new mints / token listings from Pump.fun using the Moralis API
+    /// Fetch recent new mints / token listings from Pump.fun using Solana RPC
     pub async fn fetch_pumpfun_listings(&self) -> Result<Vec<PumpFunListing>> {
-        let url = "https://solana-gateway.moralis.io/token/mainnet/exchange/pumpfun/new?limit=100";
-        let mut req = self.client.get(url);
-        if let Some(k) = &self.moralis_key {
-            req = req.header("X-API-Key", k);
+        // Pump.fun program ID
+        const PUMP_FUN_PROGRAM: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+
+        println!(
+            "[fetch_pumpfun_listings] Querying Pump.fun program: {}",
+            PUMP_FUN_PROGRAM
+        );
+
+        // Build RPC request to get all program accounts (no filters to debug)
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: 1,
+            method: "getProgramAccounts".to_string(),
+            params: serde_json::json!([
+                PUMP_FUN_PROGRAM,
+                {
+                    "encoding": "base64",
+                    "dataSlice": {
+                        "offset": 0,
+                        "length": 0
+                    }
+                }
+            ]),
+        };
+
+        println!(
+            "[fetch_pumpfun_listings] Sending RPC request to: {}",
+            self.rpc_url
+        );
+
+        // Send HTTP request
+        let response = self
+            .client
+            .post(&self.rpc_url)
+            .json(&request)
+            .send()
+            .await?;
+
+        let status = response.status();
+        println!("[fetch_pumpfun_listings] RPC response status: {}", status);
+
+        if !status.is_success() {
+            let error_body = response.text().await?;
+            println!(
+                "[fetch_pumpfun_listings] RPC error response: {}",
+                error_body
+            );
+            return Ok(Vec::new());
         }
-        let resp = req.send().await?.error_for_status()?;
-        let body = resp.text().await?;
 
-        //let status = resp.status();
-        //println!("[fetch_pumpfun_listings] URL={} STATUS={} RESPONSE_BODY={}", url, status, body);
+        let body = response.text().await?;
+        println!(
+            "[fetch_pumpfun_listings] RPC response body length: {} bytes",
+            body.len()
+        );
 
-        let resp_wrapper: PumpFunResponse =
-            serde_json::from_str(&body).unwrap_or(PumpFunResponse { result: None });
-        Ok(resp_wrapper.result.unwrap_or_default())
+        // Check for RPC errors
+        if body.contains("\"error\"") {
+            println!("[fetch_pumpfun_listings] RPC returned error: {}", body);
+            return Ok(Vec::new());
+        }
+
+        let rpc_response: RpcResponse<Vec<ProgramAccount>> =
+            serde_json::from_str(&body).map_err(|e| {
+                println!("[fetch_pumpfun_listings] JSON parse error: {}", e);
+                println!(
+                    "[fetch_pumpfun_listings] Response body: {}",
+                    &body[..body.len().min(500)]
+                );
+                e
+            })?;
+
+        if let Some(accounts) = rpc_response.result {
+            println!(
+                "[fetch_pumpfun_listings] Found {} total program accounts",
+                accounts.len()
+            );
+
+            // Log account sizes to understand the data structure
+            let mut size_counts: std::collections::HashMap<usize, usize> =
+                std::collections::HashMap::new();
+            for account in &accounts {
+                if let Some(base64_data) = account.account.data.get(0) {
+                    use base64::Engine;
+                    if let Ok(data) = base64::engine::general_purpose::STANDARD.decode(base64_data)
+                    {
+                        *size_counts.entry(data.len()).or_insert(0) += 1;
+                    }
+                }
+            }
+
+            println!("[fetch_pumpfun_listings] Account size distribution:");
+            let mut sizes: Vec<_> = size_counts.iter().collect();
+            sizes.sort_by_key(|(size, _)| *size);
+            for (size, count) in sizes {
+                println!("  {} bytes: {} accounts", size, count);
+            }
+
+            Ok(Vec::new()) // Return empty for now while debugging
+        } else {
+            println!("[fetch_pumpfun_listings] RPC result is None");
+            if let Some(error) = rpc_response.error {
+                println!("[fetch_pumpfun_listings] RPC error: {:?}", error);
+            }
+            Ok(Vec::new())
+        }
     }
 
-    /// Query Moralis to get token holder statistics
-    pub async fn query_token_holder_stats(&self, mint: &str) -> Result<Option<MoralisHolderStats>> {
-        let url = format!(
-            "https://solana-gateway.moralis.io/token/mainnet/holders/{}",
-            mint
-        );
-        let mut req = self.client.get(&url);
-        if let Some(k) = &self.moralis_key {
-            req = req.header("X-API-Key", k);
+    /// Query Solana RPC to get token holder stats using HTTP JSON-RPC
+    pub async fn query_token_holder_stats(&self, mint: &str) -> Result<Option<HolderStats>> {
+        // Build RPC request for getProgramAccounts
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: 1,
+            method: "getProgramAccounts".to_string(),
+            params: serde_json::json!([
+                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", // SPL Token Program
+                {
+                    "encoding": "base64",
+                    "filters": [
+                        { "dataSize": 165 },
+                        { "memcmp": { "offset": 0, "bytes": mint } }
+                    ]
+                }
+            ]),
+        };
+
+        // Send HTTP request
+        let response = self
+            .client
+            .post(&self.rpc_url)
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Ok(None);
         }
-        let resp = req.send().await?;
-        let status = resp.status();
-        if status.is_success() {
-            let body = resp.text().await?;
-            let stats: MoralisHolderStats = serde_json::from_str(&body)?;
-            Ok(Some(stats))
+
+        let rpc_response: RpcResponse<Vec<ProgramAccount>> = response.json().await?;
+
+        if let Some(accounts) = rpc_response.result {
+            let total_holders = accounts.len() as u64;
+            Ok(Some(HolderStats {
+                total: Some(total_holders),
+                supply_distribution: None,
+            }))
         } else {
             Ok(None)
         }
     }
 
-    /// Query Moralis to get top token holders
-    pub async fn query_token_top_holders(
-        &self,
-        mint: &str,
-    ) -> Result<Option<MoralisTopHoldersResponse>> {
-        let url = format!(
-            "https://solana-gateway.moralis.io/token/mainnet/{}/top-holders",
-            mint
-        );
-        let mut req = self.client.get(&url);
-        if let Some(k) = &self.moralis_key {
-            req = req.header("X-API-Key", k);
+    /// Query Solana RPC to get top token holders using HTTP JSON-RPC
+    pub async fn query_token_top_holders(&self, mint: &str) -> Result<Option<TopHoldersResponse>> {
+        // Build RPC request for getProgramAccounts
+        let request = RpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: 1,
+            method: "getProgramAccounts".to_string(),
+            params: serde_json::json!([
+                "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", // SPL Token Program
+                {
+                    "encoding": "base64",
+                    "filters": [
+                        { "dataSize": 165 },
+                        { "memcmp": { "offset": 0, "bytes": mint } }
+                    ]
+                }
+            ]),
+        };
+
+        // Send HTTP request
+        let response = self
+            .client
+            .post(&self.rpc_url)
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Ok(None);
         }
-        let resp = req.send().await?;
-        let status = resp.status();
-        if status.is_success() {
-            let body = resp.text().await?;
-            let holders: MoralisTopHoldersResponse = serde_json::from_str(&body)?;
-            Ok(Some(holders))
+
+        let rpc_response: RpcResponse<Vec<ProgramAccount>> = response.json().await?;
+
+        if let Some(accounts) = rpc_response.result {
+            // Parse token account data to get balances
+            let mut holders: Vec<(String, u64)> = Vec::new();
+            let mut total_supply: u64 = 0;
+
+            for account_info in accounts {
+                // Decode base64 account data
+                if let Some(base64_data) = account_info.account.data.get(0) {
+                    use base64::Engine;
+                    if let Ok(data) = base64::engine::general_purpose::STANDARD.decode(base64_data)
+                    {
+                        // Token account layout:
+                        // 0-32: mint (32 bytes)
+                        // 32-64: owner (32 bytes)
+                        // 64-72: amount (8 bytes, little-endian u64)
+                        if data.len() >= 72 {
+                            let owner = bs58::encode(&data[32..64]).into_string();
+                            let amount_bytes: [u8; 8] = data[64..72].try_into().unwrap_or([0; 8]);
+                            let amount = u64::from_le_bytes(amount_bytes);
+
+                            if amount > 0 {
+                                holders.push((owner, amount));
+                                total_supply += amount;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Sort by amount descending
+            holders.sort_by(|a, b| b.1.cmp(&a.1));
+
+            // Take top 20 holders
+            let top_holders: Vec<TopHolder> = holders
+                .iter()
+                .take(20)
+                .map(|(owner, amount)| {
+                    let percentage = if total_supply > 0 {
+                        (*amount as f64 / total_supply as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    TopHolder {
+                        owner_address: Some(owner.clone()),
+                        amount: Some(amount.to_string()),
+                        amount_formatted: Some(amount.to_string()),
+                        percentage_relative_to_total_supply: Some(percentage),
+                        usd_value: None,
+                    }
+                })
+                .collect();
+
+            Ok(Some(TopHoldersResponse {
+                result: Some(top_holders),
+            }))
         } else {
             Ok(None)
         }

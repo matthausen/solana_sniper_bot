@@ -1,5 +1,6 @@
 mod config;
 mod db;
+mod models;
 mod scanner;
 mod simulator;
 mod strategy;
@@ -26,11 +27,7 @@ async fn main() -> Result<()> {
     let pool = connect(&cfg.database_url).await?;
     ensure_migrations(&pool).await.expect("migrations failed");
 
-    let scanner = scanner::Scanner::new(
-        cfg.moralis_key.clone(),
-        cfg.solscan_key.clone(),
-        cfg.dexscreener_key.clone(),
-    );
+    let scanner = scanner::Scanner::new(cfg.dexscreener_key.clone());
 
     println!(
         "Running simulation for {} minutes (using real APIs)...",
