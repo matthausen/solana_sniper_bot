@@ -4,6 +4,7 @@ mod models;
 mod scanner;
 mod simulator;
 mod strategy;
+mod strategy_config;
 
 use crate::config::Config;
 use crate::db::{connect, ensure_migrations};

@@ -1,3 +1,4 @@
+use crate::strategy_config::StrategyConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,7 +22,7 @@ pub struct TokenEvent {
 }
 
 impl TokenEvent {
-    pub fn compute_score(&self) -> f64 {
+    pub fn compute_score(&self, config: &StrategyConfig) -> f64 {
         let mut score = 50.0;
 
         // Known rugger = instant fail
@@ -29,71 +30,78 @@ impl TokenEvent {
             return 0.0;
         }
 
-        // Holder count: 200+ holders is critical (up to +30 points)
-        if self.holders >= 200 {
-            score += ((self.holders as f64 - 200.0) / 50.0).min(30.0);
+        // Holder count: bonus for holders above minimum
+        if self.holders >= config.min_holders {
+            score += ((self.holders as f64 - config.min_holders as f64) / 50.0).min(30.0);
         } else {
             // Penalty for low holders
-            score -= (200.0 - self.holders as f64) / 10.0;
+            score -= (config.min_holders as f64 - self.holders as f64) / 10.0;
         }
 
         // Dev hold percentage: stricter penalties
-        if self.dev_hold_pct > 15.0 {
+        if self.dev_hold_pct > config.max_dev_hold_pct {
             score -= 100.0; // Auto-fail
         } else if self.dev_hold_pct > 10.0 {
-            score -= (self.dev_hold_pct - 10.0) * 4.0; // -20 points at 15%
+            score -= (self.dev_hold_pct - 10.0) * config.high_dev_hold_penalty_multiplier;
         } else if self.dev_hold_pct < 5.0 {
-            score += 10.0; // Bonus for low dev hold
+            score += config.low_dev_hold_bonus;
         }
 
-        // Liquidity: strong buy pressure indicator (up to +25 points)
-        score += (self.liquidity_usd / 1000.0).min(25.0);
+        // Liquidity: strong buy pressure indicator
+        score += (self.liquidity_usd / config.liquidity_bonus_divisor).min(25.0);
 
-        // Market cap sweet spot: $50k-$250k
+        // Market cap sweet spot
         if self.market_cap_usd >= 50_000.0 && self.market_cap_usd <= 250_000.0 {
-            score += 15.0;
-        } else if self.market_cap_usd > 250_000.0 && self.market_cap_usd <= 300_000.0 {
+            score += config.market_cap_sweet_spot_bonus;
+        } else if self.market_cap_usd > 250_000.0
+            && self.market_cap_usd <= config.max_market_cap_usd
+        {
             score += 5.0; // Small bonus for near sweet spot
         }
 
         // Safety flags
         if self.upgradeable {
-            score -= 20.0;
+            score -= config.upgradeable_penalty;
         }
         if self.freeze_authority {
-            score -= 15.0;
+            score -= config.freeze_authority_penalty;
         }
 
         // Momentum and graduation signals
         if self.momentum {
-            score += 20.0;
+            score += config.momentum_bonus;
         }
         if self.graduation {
-            score += 25.0;
+            score += config.graduation_bonus;
         }
 
         score.max(0.0).min(100.0)
     }
 
-    pub fn passes_basic_filters(&self) -> bool {
+    pub fn passes_basic_filters(&self, config: &StrategyConfig) -> bool {
         // Known rugger = instant reject
         if self.is_dev_known_rugger {
             return false;
         }
-        // Market cap: $50k - $250k sweet spot (allow up to $300k)
-        if self.market_cap_usd < 50_000.0 || self.market_cap_usd > 300_000.0 {
+        // Market cap range
+        if self.market_cap_usd < config.min_market_cap_usd
+            || self.market_cap_usd > config.max_market_cap_usd
+        {
             return false;
         }
-        // Holders: minimum 200
-        if self.holders < 200 {
+        // Holders minimum
+        if self.holders < config.min_holders {
             return false;
         }
-        // Dev hold: strict < 15%
-        if self.dev_hold_pct >= 15.0 {
+        // Dev hold maximum
+        if self.dev_hold_pct >= config.max_dev_hold_pct {
             return false;
         }
-        // Safety: no upgradeable or freeze authority
-        if self.upgradeable || self.freeze_authority {
+        // Safety: reject based on config
+        if config.reject_upgradeable && self.upgradeable {
+            return false;
+        }
+        if config.reject_freeze_authority && self.freeze_authority {
             return false;
         }
         true
@@ -107,11 +115,14 @@ pub struct TradeDecision {
     pub score: f64,
 }
 
-pub fn decide(event: &TokenEvent) -> TradeDecision {
-    let score = event.compute_score();
-    let basic = event.passes_basic_filters();
-    // README specifies score >= 75 threshold
-    let should_buy = basic && score >= 75.0 && (event.momentum || event.graduation);
+pub fn decide(event: &TokenEvent, config: &StrategyConfig) -> TradeDecision {
+    let score = event.compute_score(config);
+    let basic = event.passes_basic_filters(config);
+
+    let should_buy = basic
+        && score >= config.min_score_to_buy
+        && (!config.require_momentum_or_graduation || event.momentum || event.graduation);
+
     TradeDecision { should_buy, score }
 }
 
@@ -122,33 +133,32 @@ pub struct ExitDecision {
 }
 
 /// Determine if a position should be exited based on current token state
-///
-/// Exit conditions per README:
-/// - Option A: +50% to +100% profit from entry MC
-/// - Option B: Raydium LP detected (liquidity spike >2x)
-/// - Stop loss: -20% from entry MC
-pub fn should_exit(event: &TokenEvent, entry_liquidity: f64) -> ExitDecision {
-    // Stop loss: -20% from entry MC
-    if event.market_cap_usd < event.entry_market_cap * 0.8 {
+pub fn should_exit(
+    event: &TokenEvent,
+    entry_liquidity: f64,
+    config: &StrategyConfig,
+) -> ExitDecision {
+    // Stop loss
+    if event.market_cap_usd < event.entry_market_cap * (1.0 - config.stop_loss_pct) {
         return ExitDecision {
             should_exit: true,
             reason: "stop_loss".to_string(),
         };
     }
 
-    // Option A: Profit target (50-100% gain)
+    // Profit target
     let profit_pct = (event.market_cap_usd - event.entry_market_cap) / event.entry_market_cap;
-    if profit_pct >= 0.5 && profit_pct <= 1.0 {
+    if profit_pct >= config.min_profit_target_pct && profit_pct <= config.max_profit_target_pct {
         return ExitDecision {
             should_exit: true,
             reason: "profit_target".to_string(),
         };
     }
 
-    // Option B: Raydium LP detected (liquidity spike >2x)
-    // Also check for raydium_lp_detected flag
+    // Liquidity spike (Raydium LP detected)
     if event.raydium_lp_detected
-        || (entry_liquidity > 0.0 && event.liquidity_usd > entry_liquidity * 2.0)
+        || (entry_liquidity > 0.0
+            && event.liquidity_usd > entry_liquidity * config.lp_spike_exit_multiplier)
     {
         return ExitDecision {
             should_exit: true,

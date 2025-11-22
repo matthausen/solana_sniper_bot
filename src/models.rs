@@ -96,33 +96,3 @@ pub struct DexPairInfo {
     pub liquidity_usd: Option<f64>,
     pub price_usd: Option<f64>,
 }
-
-// Solana RPC structures
-#[derive(Debug, serde::Serialize)]
-pub(crate) struct RpcRequest {
-    pub jsonrpc: String,
-    pub id: u64,
-    pub method: String,
-    pub params: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct RpcResponse<T> {
-    pub result: Option<T>,
-    #[allow(dead_code)]
-    pub error: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ProgramAccount {
-    #[allow(dead_code)]
-    pub pubkey: String,
-    pub account: AccountData,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct AccountData {
-    pub data: Vec<String>, // [base64_data, encoding]
-    #[allow(dead_code)]
-    pub lamports: u64,
-}

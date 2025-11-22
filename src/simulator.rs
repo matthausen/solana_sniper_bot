@@ -1,5 +1,6 @@
 use crate::scanner::Scanner;
 use crate::strategy::{TokenEvent, decide};
+use crate::strategy_config::StrategyConfig;
 use anyhow::Result;
 use chrono::Utc;
 use rand::Rng;
@@ -49,16 +50,13 @@ pub async fn run_simulation(pool: &PgPool, minutes: u64, scanner: &Scanner) -> R
                 break;
             }
 
-            // Enrich with Moralis holder data and dexscreener data
             let mut ev: TokenEvent = l.clone().into();
 
-            // Get holder count from Moralis
             if let Ok(Some(holder_stats)) = scanner.query_token_holder_stats(&l.token_address).await
             {
                 ev.holders = holder_stats.total.unwrap_or(0) as i32;
             }
 
-            // Get top holders to calculate dev hold percentage
             if let Ok(Some(top_holders)) = scanner.query_token_top_holders(&l.token_address).await {
                 if let Some(holders_list) = top_holders.result {
                     if let Some(first_holder) = holders_list.first() {
@@ -92,14 +90,17 @@ pub async fn run_simulation(pool: &PgPool, minutes: u64, scanner: &Scanner) -> R
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 
-    // portfolio setup
-    let mut portfolio = Portfolio::new(3.0);
-    let sol_usd_price = 30.0;
-    let max_per_trade_sol = 0.5;
+    // Load strategy config
+    let config = StrategyConfig::default();
+
+    // portfolio setup from config
+    let mut portfolio = Portfolio::new(config.starting_sol_balance);
+    let sol_usd_price = config.sol_usd_price;
+    let max_per_trade_sol = config.max_sol_per_trade;
 
     for ev in collected.into_iter() {
         // persist token event
-        let score = ev.compute_score();
+        let score = ev.compute_score(&config);
         sqlx::query("INSERT INTO token_events (id, token_type, market_cap_usd, dev_hold_pct, liquidity_usd, holders, upgradeable, freeze_authority, momentum, graduation, base_price, score) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (id) DO NOTHING")
             .bind(&ev.id)
             .bind(&ev.token_type)
@@ -116,9 +117,12 @@ pub async fn run_simulation(pool: &PgPool, minutes: u64, scanner: &Scanner) -> R
             .execute(pool)
             .await?;
 
-        let decision = decide(&ev);
-        // Enforce max 5 active positions (per README)
-        if decision.should_buy && portfolio.sol_balance > 0.01 && portfolio.positions.len() < 5 {
+        let decision = decide(&ev, &config);
+        // Enforce max positions from config
+        if decision.should_buy
+            && portfolio.sol_balance > 0.01
+            && portfolio.positions.len() < config.max_positions
+        {
             let to_spend_sol = f64::min(max_per_trade_sol, portfolio.sol_balance);
             let mut rng = rand::thread_rng();
             let impact = 1.0 + rng.gen_range(0.0..0.05);
@@ -176,7 +180,7 @@ pub async fn run_simulation(pool: &PgPool, minutes: u64, scanner: &Scanner) -> R
 
             // Use strategy exit logic
             use crate::strategy::should_exit;
-            let exit_decision = should_exit(&current_ev, entry_liquidity);
+            let exit_decision = should_exit(&current_ev, entry_liquidity, &config);
 
             if exit_decision.should_exit {
                 let mut rng = rand::thread_rng();

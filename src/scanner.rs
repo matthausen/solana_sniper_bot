@@ -55,7 +55,7 @@ impl Scanner {
         }
     }
 
-    /// Fetch recent new mints / token listings from Pump.fun using PumpPortal WebSocket (FREE)
+    /// Fetch recent new mints / token listings from Pump.fun using PumpPortal WebSocket
     /// Connects to PumpPortal's free WebSocket API and listens for new token creation events
     pub async fn fetch_pumpfun_listings(&self) -> Result<Vec<PumpFunListing>> {
         use futures::{SinkExt, StreamExt};
@@ -365,7 +365,6 @@ impl From<PumpFunListing> for TokenEvent {
             momentum: false,
             graduation: false,
             base_price,
-            // New fields - will be populated by simulator
             dev_wallet_address: None,
             is_dev_known_rugger: false,
             entry_market_cap: market_cap,
