@@ -143,11 +143,3 @@ cargo run --release -- --mock --hours 24
    ├─ scanner.rs
    ├─ strategy.rs
    └─ simulator.rs
-
-
-
-### Api Keys
-Birdeye       | yes/no Required for reliable volume + MC + holders
-Solscan       | yes/no Required
-DEX Screener  | not needed Public API but rate limits apply
-Pump.fun      | no key needed But we must use correct endpoints
