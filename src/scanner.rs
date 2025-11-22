@@ -55,114 +55,126 @@ impl Scanner {
         }
     }
 
-    /// Fetch recent new mints / token listings from Pump.fun using Solana RPC
+    /// Fetch recent new mints / token listings from Pump.fun using PumpPortal WebSocket (FREE)
+    /// Connects to PumpPortal's free WebSocket API and listens for new token creation events
     pub async fn fetch_pumpfun_listings(&self) -> Result<Vec<PumpFunListing>> {
-        // Pump.fun program ID
-        const PUMP_FUN_PROGRAM: &str = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-        println!(
-            "[fetch_pumpfun_listings] Querying Pump.fun program: {}",
-            PUMP_FUN_PROGRAM
-        );
+        const PUMPPORTAL_WS: &str = "wss://pumpportal.fun/api/data";
 
-        // Build RPC request to get all program accounts (no filters to debug)
-        let request = RpcRequest {
-            jsonrpc: "2.0".to_string(),
-            id: 1,
-            method: "getProgramAccounts".to_string(),
-            params: serde_json::json!([
-                PUMP_FUN_PROGRAM,
-                {
-                    "encoding": "base64",
-                    "dataSlice": {
-                        "offset": 0,
-                        "length": 0
-                    }
-                }
-            ]),
+        println!("[fetch_pumpfun_listings] Connecting to PumpPortal WebSocket...");
+
+        // Connect to WebSocket
+        let (ws_stream, _) = match connect_async(PUMPPORTAL_WS).await {
+            Ok(conn) => conn,
+            Err(e) => {
+                println!(
+                    "[fetch_pumpfun_listings] WebSocket connection failed: {}",
+                    e
+                );
+                return Ok(Vec::new());
+            }
         };
 
-        println!(
-            "[fetch_pumpfun_listings] Sending RPC request to: {}",
-            self.rpc_url
-        );
+        println!("[fetch_pumpfun_listings] Connected! Subscribing to new tokens...");
 
-        // Send HTTP request
-        let response = self
-            .client
-            .post(&self.rpc_url)
-            .json(&request)
-            .send()
-            .await?;
+        let (mut write, mut read) = ws_stream.split();
 
-        let status = response.status();
-        println!("[fetch_pumpfun_listings] RPC response status: {}", status);
+        // Subscribe to new token events
+        let subscribe_msg = serde_json::json!({
+            "method": "subscribeNewToken"
+        });
 
-        if !status.is_success() {
-            let error_body = response.text().await?;
-            println!(
-                "[fetch_pumpfun_listings] RPC error response: {}",
-                error_body
-            );
+        if let Err(e) = write.send(Message::Text(subscribe_msg.to_string())).await {
+            println!("[fetch_pumpfun_listings] Failed to subscribe: {}", e);
             return Ok(Vec::new());
         }
 
-        let body = response.text().await?;
-        println!(
-            "[fetch_pumpfun_listings] RPC response body length: {} bytes",
-            body.len()
-        );
+        println!("[fetch_pumpfun_listings] Subscribed! Listening for new tokens (3 seconds)...");
 
-        // Check for RPC errors
-        if body.contains("\"error\"") {
-            println!("[fetch_pumpfun_listings] RPC returned error: {}", body);
-            return Ok(Vec::new());
-        }
+        let mut listings = Vec::new();
+        let start_time = std::time::Instant::now();
+        let listen_duration = std::time::Duration::from_secs(3);
 
-        let rpc_response: RpcResponse<Vec<ProgramAccount>> =
-            serde_json::from_str(&body).map_err(|e| {
-                println!("[fetch_pumpfun_listings] JSON parse error: {}", e);
-                println!(
-                    "[fetch_pumpfun_listings] Response body: {}",
-                    &body[..body.len().min(500)]
-                );
-                e
-            })?;
+        // Listen for messages for 3 seconds
+        while start_time.elapsed() < listen_duration {
+            let timeout =
+                tokio::time::timeout(std::time::Duration::from_millis(500), read.next()).await;
 
-        if let Some(accounts) = rpc_response.result {
-            println!(
-                "[fetch_pumpfun_listings] Found {} total program accounts",
-                accounts.len()
-            );
+            match timeout {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    // Parse the message
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(&text) {
+                        // Extract token information from the event
+                        if let Some(mint) = data.get("mint").and_then(|v| v.as_str()) {
+                            println!("[fetch_pumpfun_listings] ✅ New token: {}", mint);
 
-            // Log account sizes to understand the data structure
-            let mut size_counts: std::collections::HashMap<usize, usize> =
-                std::collections::HashMap::new();
-            for account in &accounts {
-                if let Some(base64_data) = account.account.data.get(0) {
-                    use base64::Engine;
-                    if let Ok(data) = base64::engine::general_purpose::STANDARD.decode(base64_data)
-                    {
-                        *size_counts.entry(data.len()).or_insert(0) += 1;
+                            let listing = PumpFunListing {
+                                token_address: mint.to_string(),
+                                name: data
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                symbol: data
+                                    .get("symbol")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string()),
+                                logo: data
+                                    .get("uri")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                                    .or_else(|| {
+                                        data.get("image")
+                                            .and_then(|v| v.as_str())
+                                            .map(|s| s.to_string())
+                                    }),
+                                decimals: Some("6".to_string()),
+                                price_native: data
+                                    .get("initialBuy")
+                                    .and_then(|v| v.as_f64())
+                                    .map(|p| p.to_string()),
+                                price_usd: None,
+                                liquidity: data
+                                    .get("virtualSolReserves")
+                                    .and_then(|v| v.as_f64())
+                                    .map(|l| (l / 1_000_000_000.0).to_string()),
+                                fully_diluted_valuation: data
+                                    .get("marketCap")
+                                    .and_then(|v| v.as_f64())
+                                    .map(|m| m.to_string()),
+                                created_at: Some(chrono::Utc::now().timestamp().to_string()),
+                            };
+
+                            listings.push(listing);
+                        }
                     }
                 }
+                Ok(Some(Ok(Message::Close(_)))) => {
+                    println!("[fetch_pumpfun_listings] WebSocket closed by server");
+                    break;
+                }
+                Ok(Some(Err(e))) => {
+                    println!("[fetch_pumpfun_listings] WebSocket error: {}", e);
+                    break;
+                }
+                Ok(None) => {
+                    println!("[fetch_pumpfun_listings] WebSocket stream ended");
+                    break;
+                }
+                Err(_) => {
+                    // Timeout - continue listening
+                    continue;
+                }
+                _ => continue,
             }
-
-            println!("[fetch_pumpfun_listings] Account size distribution:");
-            let mut sizes: Vec<_> = size_counts.iter().collect();
-            sizes.sort_by_key(|(size, _)| *size);
-            for (size, count) in sizes {
-                println!("  {} bytes: {} accounts", size, count);
-            }
-
-            Ok(Vec::new()) // Return empty for now while debugging
-        } else {
-            println!("[fetch_pumpfun_listings] RPC result is None");
-            if let Some(error) = rpc_response.error {
-                println!("[fetch_pumpfun_listings] RPC error: {:?}", error);
-            }
-            Ok(Vec::new())
         }
+
+        println!(
+            "[fetch_pumpfun_listings] Collected {} new tokens",
+            listings.len()
+        );
+        Ok(listings)
     }
 
     /// Query Solana RPC to get token holder stats using HTTP JSON-RPC
